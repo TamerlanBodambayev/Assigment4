@@ -1,1 +1,136 @@
+name: Security Scan
 
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    # Run weekly on Monday at 9 AM
+    - cron: '0 9 * * 1'
+
+jobs:
+  bandit-scan:
+    name: Bandit Static Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Bandit
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit
+
+    - name: Run Bandit Security Scan
+      run: |
+        bandit -r . -f html -o bandit-report.html -ll
+        bandit -r . -f txt
+
+    - name: Upload Bandit Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: bandit-security-report
+        path: bandit-report.html
+        retention-days: 30
+
+    - name: Fail on High Severity Issues
+      run: |
+        bandit -r . -f json -o bandit-results.json || true
+        python .github/scripts/check_bandit_results.py
+
+  safety-scan:
+    name: Safety Dependency Check
+    runs-on: ubuntu-latest
+    needs: bandit-scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Safety
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety
+
+    - name: Generate requirements.txt if missing
+      run: |
+        if [ ! -f requirements.txt ]; then
+          pip freeze > requirements.txt
+        fi
+
+    - name: Run Safety Vulnerability Scan
+      run: |
+        safety check -r requirements.txt --output html --output-file safety-report.html
+        safety check -r requirements.txt
+
+    - name: Upload Safety Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: safety-vulnerability-report
+        path: safety-report.html
+        retention-days: 30
+
+    - name: Fail on Critical Vulnerabilities
+      run: |
+        safety check -r requirements.txt --json --output-file safety-results.json || true
+        python .github/scripts/check_safety_results.py
+
+  trivy-scan:
+    name: Trivy Container Scan
+    runs-on: ubuntu-latest
+    if: false  # Disabled by default, enable if you have Docker
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [bandit-scan, safety-scan]
+    if: always()
+    
+    steps:
+    - name: Security Scan Summary
+      run: |
+        echo "🔒 Security Scan Completed"
+        echo "=========================="
+        echo "Bandit Scan: ${{ needs.bandit-scan.result }}"
+        echo "Safety Scan: ${{ needs.safety-scan.result }}"
+        echo ""
+        echo "📊 Reports Available:"
+        echo "- Bandit Static Analysis"
+        echo "- Safety Dependency Check"
+        
+        if [ "${{ needs.bandit-scan.result }}" == "failure" ] || [ "${{ needs.safety-scan.result }}" == "failure" ]; then
+          echo "❌ Security checks failed! Please review the reports."
+          exit 1
+        else
+          echo "✅ All security checks passed!"
+        fi
